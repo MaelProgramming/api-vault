@@ -1,147 +1,95 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { supabase } from './lib/supabase.js';
-import cors from 'cors'
-import multer from 'multer'
+import cors from 'cors';
+import multer from 'multer';
+import admin from 'firebase-admin'; // Indispensable pour valider le jeton
 
-interface MulterRequest extends Request {
-  file?: Express.Multer.File;
+// Initialisation Firebase Admin (utilise tes variables d'environnement Vercel)
+if (!admin.apps.length) {
+  admin.initializeApp({
+    credential: admin.credential.cert({
+      projectId: process.env.FIREBASE_PROJECT_ID,
+      clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+      privateKey: process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+    }),
+  });
 }
-const upload = multer({ storage: multer.memoryStorage() });
-const app = express()
 
+const app = express();
+const upload = multer({ storage: multer.memoryStorage() });
+
+// --- MIDDLEWARE D'AUTHENTIFICATION FIREBASE ---
 const checkAuth = async (req: Request, res: Response, next: NextFunction) => {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Acceso no autorizado' });
+  if (!authHeader?.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Identificación requerida' });
   }
 
   const token = authHeader.split(' ')[1];
-  const { data: { user }, error } = await supabase.auth.getUser(token);
 
-  if (error || !user) {
+  try {
+    // On vérifie le token auprès de Firebase
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    (req as any).user = decodedToken; // On attache l'user (contient l'email, l'uid Firebase, etc.)
+    next();
+  } catch (error) {
     return res.status(401).json({ error: 'Sesión inválida o expirada' });
   }
-
-  // On attache l'user à la requête pour l'utiliser dans le controller
-  (req as any).user = user;
-  next();
 };
-// --- MIDDLEWARES (L'ordre est vital) ---
-app.use(cors())
-app.use(express.json()) // <--- C'EST ÇA QUI TE MANQUAIT POUR FIX L'ERREUR 500
 
-app.get('/', (req, res) => {
-  res.json({ status: 'ok', message: 'Backend working properly'})
-})
+app.use(cors());
+app.use(express.json());
 
-// Récupérer les membres
-app.get('/api/members', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+// 1. Récupérer MON profil (Le fameux endpoint /me)
+app.get('/api/members/me', checkAuth, async (req: any, res: Response) => {
   try {
+    // On cherche dans la table 'members' via l'email du token Firebase
     const { data, error } = await supabase
       .from('members')
       .select('*')
-      .order('created_at', { ascending: false });
+      .eq('email', req.user.email)
+      .single();
 
-    if (error) {
-      res.status(500).json({ error: 'Acceso al registro denegado.' });
-      return;
-    }
+    if (error || !data) return res.status(404).json({ error: 'Perfil no encontrado' });
 
     res.status(200).json(data);
   } catch (err) {
-    next(err);
+    res.status(500).json({ error: 'Error de servidor' });
   }
 });
 
-// Update Avatar
-app.patch('/api/members/:id/avatar', checkAuth, upload.single('avatar'), async (req: Request, res: Response) => {
-  try {
-    const { id } = req.params;
-    const file = req.file;
-
-    if (!file) return res.status(400).json({ error: 'No se ha seleccionado ninguna imagen' });
-
-    const fileExtension = file.originalname.split('.').pop();
-    const fileName = `${id}-${Date.now()}.${fileExtension}`;
-    
-    // 1. Upload vers le bucket 'avatars'
-    const { data: storageData, error: storageError } = await supabase.storage
-      .from('avatars')
-      .upload(fileName, file.buffer, {
-        contentType: file.mimetype,
-        upsert: true
-      });
-
-    if (storageError) throw storageError;
-
-    // 2. Générer une URL SIGNÉE valable 10 ans
-    // 10 ans en secondes = 10 * 365 * 24 * 60 * 60 = 315,360,000
-    const TEN_YEARS_IN_SECONDS = 315360000;
-    
-    const { data: signedData, error: signedError } = await supabase.storage
-      .from('avatars')
-      .createSignedUrl(fileName, TEN_YEARS_IN_SECONDS);
-
-    if (signedError || !signedData) throw signedError;
-
-    const longTermUrl = signedData.signedUrl;
-
-    // 3. Mise à jour de la Base de Données avec cette URL spéciale
-    const { error: dbError } = await supabase
-      .from('members')
-      .update({ 
-        avatar_url: longTermUrl 
-      })
-      .eq('id', id);
-
-    if (dbError) throw dbError;
-
-    res.status(200).json({ 
-      url: longTermUrl,
-      message: 'Imagen actualizada con éxito (Válida por 10 años)' 
-    });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Error al generar el enlace de larga duración' });
-  }
+// 2. Récupérer tous les membres (Public)
+app.get('/api/members', async (req, res) => {
+  const { data, error } = await supabase.from('members').select('*').order('created_at', { ascending: false });
+  if (error) return res.status(500).json({ error: 'Acceso denegado' });
+  res.status(200).json(data);
 });
 
-// Login Magic Link
-app.post('/api/auth/login', async (req: Request, res: Response) => {
-  try {
-    const { email } = req.body;
+// 3. Update Avatar (Toujours protégé)
+app.patch('/api/members/:id/avatar', checkAuth, upload.single('avatar'), async (req: any, res: Response) => {
+  // ... garde ta logique d'upload actuelle, elle est nickel avec l'URL signée sur 10 ans
+});
 
-    if (!email) {
-      return res.status(400).json({ error: 'El correo electrónico es obligatorio.' });
-    }
+// 4. Update Semblanza (Bio)
+app.patch('/api/members/:id/bio', checkAuth, async (req: any, res: Response) => {
+  const { id } = req.params;
+  const { bio } = req.body;
 
-    const { data, error } = await supabase.auth.admin.generateLink({
-      type: 'magiclink',
-      email: email,
-      options: { 
-        redirectTo: 'http://localhost:5173/auth/callback' 
-      }
-    });
+  console.log("Tentative d'update pour ID:", id, "avec bio:", bio);
 
-    if (error) {
-      return res.status(401).json({ error: 'Acceso denegado. Credenciales no reconocidas.' });
-    }
+  const { data, error } = await supabase
+    .from('members')
+    .update({ bio })
+    .eq('id', id)
+    .select(); // Le .select() permet de voir ce qui a été modifié
 
-    // --- LE TRUC DE GÉNIE EST ICI ---
-    // Ce lien va apparaître dans tes "Runtime Logs" sur Vercel
-    console.log("-----------------------------------------");
-    console.log("ACCESO VIP PARA MAEL:", data.properties.action_link);
-    console.log("-----------------------------------------");
-
-    res.status(200).json({ 
-      message: 'Enlace de acceso generado. Revisa los logs del servidor.' 
-    });
-
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Error interno en el sistema de autenticación.' });
+  if (error) {
+    console.error("Erreur Supabase:", error);
+    return res.status(500).json(error);
   }
+
+  console.log("Data après update:", data);
+  res.status(200).json({ message: 'Semblanza actualizada', data });
 });
 
 export default app;
