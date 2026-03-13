@@ -1,0 +1,17 @@
+{
+  "name": "express",
+  "type": "module",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.99.0",
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^5.1.0",
+    "multer": "^2.1.1"
+  },
+  "devDependencies": {
+    "@types/express": "5.0.0",
+    "@types/multer": "^2.1.0",
+    "@types/node": "20.11.17",
+    "typescript": "5.8.3"
+  }
+}
