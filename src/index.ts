@@ -67,7 +67,57 @@ app.get('/api/members', async (req, res) => {
 
 // 3. Update Avatar (Toujours protégé)
 app.patch('/api/members/:id/avatar', checkAuth, upload.single('avatar'), async (req: any, res: Response) => {
-  // ... garde ta logique d'upload actuelle, elle est nickel avec l'URL signée sur 10 ans
+  const { id } = req.params;
+  const file = req.file;
+
+  if (!file) {
+    return res.status(400).json({ error: 'Aucun fichier envoyé' });
+  }
+
+  try {
+    // 1. Définir le chemin du fichier (on utilise l'ID pour que chaque user écrase son ancien avatar)
+    const fileExtension = file.originalname.split('.').pop();
+    const filePath = `avatars/${id}-${Date.now()}.${fileExtension}`;
+
+    // 2. Upload sur Supabase Storage (Bucket 'avatars')
+    const { data: uploadData, error: uploadError } = await supabase.storage
+      .from('avatars')
+      .upload(filePath, file.buffer, {
+        contentType: file.mimetype,
+        upsert: true,
+      });
+
+    if (uploadError) throw uploadError;
+
+    // 3. Créer une URL signée pour 10 ans (en secondes)
+    // 10 ans = 10 * 365 * 24 * 60 * 60 = 315 360 000 secondes
+    const { data: signedData, error: signedError } = await supabase.storage
+      .from('avatars')
+      .createSignedUrl(filePath, 315360000);
+
+    if (signedError) throw signedError;
+
+    const signedUrl = signedData.signedUrl;
+
+    // 4. Update de la colonne 'avatar_url' dans la table 'members'
+    const { error: dbError } = await supabase
+      .from('members')
+      .update({ avatar_url: signedUrl })
+      .eq('id', id);
+
+    if (dbError) throw dbError;
+
+    console.log(`Avatar mis à jour pour l'élite ID: ${id}`);
+    
+    res.status(200).json({ 
+      message: 'Avatar mis à jour avec classe', 
+      url: signedUrl 
+    });
+
+  } catch (err: any) {
+    console.error("Crash de l'upload :", err.message);
+    res.status(500).json({ error: 'Erreur lors de l’upload de l’image' });
+  }
 });
 
 // 4. Update Semblanza (Bio)
@@ -91,5 +141,6 @@ app.patch('/api/members/:id/bio', checkAuth, async (req: any, res: Response) => 
   console.log("Data après update:", data);
   res.status(200).json({ message: 'Semblanza actualizada', data });
 });
+
 
 export default app;
