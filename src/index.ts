@@ -40,6 +40,10 @@ const checkAuth = async (req: Request, res: Response, next: NextFunction) => {
 app.use(cors());
 app.use(express.json());
 
+app.get('/', (res: Response) => {
+  res.json({ status: "Application running correctly"})
+})
+
 // 1. Récupérer MON profil (Le fameux endpoint /me)
 app.get('/api/members/me', checkAuth, async (req: any, res: Response) => {
   try {
