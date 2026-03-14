@@ -40,9 +40,9 @@ const checkAuth = async (req: Request, res: Response, next: NextFunction) => {
 app.use(cors());
 app.use(express.json());
 
-app.get('/', (res: Response) => {
-  res.status(200).json({ok: 'Backend running'})
-})
+app.get('/', (_req: Request, res: Response) => {
+  res.status(200).json({ ok: 'Backend running' });
+});
 
 // 1. Récupérer MON profil (Le fameux endpoint /me)
 app.get('/api/members/me', checkAuth, async (req: any, res: Response) => {
@@ -63,10 +63,44 @@ app.get('/api/members/me', checkAuth, async (req: any, res: Response) => {
 });
 
 // 2. Récupérer tous les membres (Public)
-app.get('/api/members', async (req, res) => {
-  const { data, error } = await supabase.from('members').select('*').order('created_at', { ascending: false });
-  if (error) return res.status(500).json({ error: 'Acceso denegado' });
-  res.status(200).json(data);
+// 2. Récupérer les membres non swipés (Filtrage Élite)
+app.get('/api/members', checkAuth, async (req: any, res: Response) => {
+  try {
+    // 1. Choper mon ID via mon email (Firebase)
+    const { data: me } = await supabase
+      .from('members')
+      .select('id')
+      .eq('email', req.user.email)
+      .single();
+
+    if (!me) return res.status(404).json({ error: 'Ton profil n’existe pas' });
+
+    // 2. Choper la liste des IDs que j'ai déjà swipés
+    const { data: swipedData } = await supabase
+      .from('swipes')
+      .select('swiped_id')
+      .eq('swiper_id', me.id);
+
+    const alreadySwipedIds = swipedData?.map(s => s.swiped_id) || [];
+    
+    // On s'exclut soi-même de la liste aussi, faut pas déconner
+    alreadySwipedIds.push(me.id);
+
+    // 3. Récupérer les membres qui ne sont pas dans cette liste
+    const { data, error } = await supabase
+      .from('members')
+      .select('*')
+      .not('id', 'in', `(${alreadySwipedIds.join(',')})`)
+      .order('created_at', { ascending: false })
+      .limit(20); // On envoie par packs de 20 pour la fluidité
+
+    if (error) throw error;
+
+    res.status(200).json(data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Impossible de charger la pile' });
+  }
 });
 
 // 3. Update Avatar (Toujours protégé)
@@ -144,6 +178,69 @@ app.patch('/api/members/:id/bio', checkAuth, async (req: any, res: Response) => 
 
   console.log("Data après update:", data);
   res.status(200).json({ message: 'Semblanza actualizada', data });
+});
+
+// 5. Swipe Logic (Le moteur de The Vault)
+app.post('/api/swipe', checkAuth, async (req: any, res: Response) => {
+  const { swipedId, isLike } = req.body;
+  const swiperEmail = req.user.email; // On récupère l'email via le token validé
+
+  try {
+    // 1. Récupérer l'ID interne de celui qui swipe
+    const { data: member } = await supabase
+      .from('members')
+      .select('id')
+      .eq('email', swiperEmail)
+      .single();
+
+    if (!member) return res.status(404).json({ error: 'Membre introuvable' });
+
+    const swiperId = member.id;
+
+    // 2. Enregistrer le swipe (on utilise upsert pour éviter les doublons sales)
+    const { error: swipeError } = await supabase
+      .from('swipes')
+      .upsert({ 
+        swiper_id: swiperId, 
+        swiped_id: swipedId, 
+        is_like: isLike 
+      }, { onConflict: 'swiper_id,swiped_id' });
+
+    if (swipeError) throw swipeError;
+
+    // 3. Si c'est un "Pass", on s'arrête là
+    if (!isLike) return res.status(200).json({ match: false });
+
+    // 4. Vérifier si c'est un match (Réciprocité)
+    const { data: reciprocate } = await supabase
+      .from('swipes')
+      .select('id')
+      .eq('swiper_id', swipedId)
+      .eq('swiped_id', swiperId)
+      .eq('is_like', true)
+      .single();
+
+    if (reciprocate) {
+      // 5. Création de la conversation (Tri des IDs pour l'unicité du salon)
+      const [u1, u2] = [swiperId, swipedId].sort();
+      
+      const { data: conv, error: convError } = await supabase
+        .from('conversations')
+        .upsert({ user_1: u1, user_2: u2 }, { onConflict: 'user_1,user_2' })
+        .select()
+        .single();
+
+      if (convError) throw convError;
+
+      return res.status(200).json({ match: true, conversationId: conv.id });
+    }
+
+    res.status(200).json({ match: false });
+
+  } catch (err) {
+    console.error("Erreur Swipe:", err);
+    res.status(500).json({ error: 'Erreur lors du swipe' });
+  }
 });
 
 
