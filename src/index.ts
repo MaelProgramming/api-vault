@@ -41,7 +41,7 @@ app.use(cors());
 app.use(express.json());
 
 app.get('/', (res: Response) => {
-  res.json({ status: "Application running correctly"})
+  res.status(200).json({ok: 'Backend running'})
 })
 
 // 1. Récupérer MON profil (Le fameux endpoint /me)
