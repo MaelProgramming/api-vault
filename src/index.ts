@@ -116,6 +116,7 @@ app.patch('/api/members/:id/avatar', checkAuth, upload.single('avatar'), async (
     // 1. Définir le chemin du fichier (on utilise l'ID pour que chaque user écrase son ancien avatar)
     const fileExtension = file.originalname.split('.').pop();
     const filePath = `avatars/${id}-${Date.now()}.${fileExtension}`;
+    const tenY: number = 315360000;
 
     // 2. Upload sur Supabase Storage (Bucket 'avatars')
     const { data: uploadData, error: uploadError } = await supabase.storage
@@ -131,7 +132,7 @@ app.patch('/api/members/:id/avatar', checkAuth, upload.single('avatar'), async (
     // 10 ans = 10 * 365 * 24 * 60 * 60 = 315 360 000 secondes
     const { data: signedData, error: signedError } = await supabase.storage
       .from('avatars')
-      .createSignedUrl(filePath, 315360000);
+      .createSignedUrl(filePath, tenY);
 
     if (signedError) throw signedError;
 
