@@ -4,6 +4,9 @@ import cors from 'cors';
 import multer from 'multer';
 import admin from 'firebase-admin'; // Indispensable pour valider le jeton
 
+interface AuthenticatedRequest extends Request {
+  user: admin.auth.DecodedIdToken;
+}
 // Initialisation Firebase Admin (utilise tes variables d'environnement Vercel)
 if (!admin.apps.length) {
   admin.initializeApp({
@@ -30,7 +33,7 @@ const checkAuth = async (req: Request, res: Response, next: NextFunction) => {
   try {
     // On vérifie le token auprès de Firebase
     const decodedToken = await admin.auth().verifyIdToken(token);
-    (req as any).user = decodedToken; // On attache l'user (contient l'email, l'uid Firebase, etc.)
+    (req as AuthenticatedRequest).user = decodedToken; // On attache l'user (contient l'email, l'uid Firebase, etc.)
     next();
   } catch (error) {
     return res.status(401).json({ error: 'Sesión inválida o expirada' });
@@ -82,7 +85,7 @@ app.get('/api/members', checkAuth, async (req: any, res: Response) => {
       .eq('swiper_id', me.id);
 
     const alreadySwipedIds = swipedData?.map(s => s.swiped_id) || [];
-    
+
     // On s'exclut soi-même de la liste aussi, faut pas déconner
     alreadySwipedIds.push(me.id);
 
@@ -113,8 +116,33 @@ app.patch('/api/members/:id/avatar', checkAuth, upload.single('avatar'), async (
   }
 
   try {
+    // 0. Fetch the old avatar to get 'oldpath' and delete it so we don't accumulate images
+    const { data: memberData } = await supabase
+      .from('members')
+      .select('avatar_url')
+      .eq('id', id)
+      .single();
+
+    let oldpath: string | null = null;
+    if (memberData?.avatar_url) {
+      try {
+        const urlObj = new URL(memberData.avatar_url);
+        // Extract the path from the URL.
+        // Signed URL looks like: .../storage/v1/object/sign/avatars/avatars/{id}-{timestamp}.{ext}
+        const match = urlObj.pathname.match(/\/sign\/avatars\/(.+)/);
+        if (match && match[1]) {
+           oldpath = match[1];
+        }
+      } catch(e) { /* ignore parse error */ }
+    }
+
+    if (oldpath) {
+      await supabase.storage.from('avatars').remove([oldpath]);
+    }
+
     // 1. Définir le chemin du fichier (on utilise l'ID pour que chaque user écrase son ancien avatar)
     const fileExtension = file.originalname.split('.').pop();
+
     const filePath = `avatars/${id}-${Date.now()}.${fileExtension}`;
     const tenY: number = 315360000;
 
@@ -147,10 +175,10 @@ app.patch('/api/members/:id/avatar', checkAuth, upload.single('avatar'), async (
     if (dbError) throw dbError;
 
     console.log(`Avatar mis à jour pour l'élite ID: ${id}`);
-    
-    res.status(200).json({ 
-      message: 'Avatar mis à jour avec classe', 
-      url: signedUrl 
+
+    res.status(200).json({
+      message: 'Avatar mis à jour avec classe',
+      url: signedUrl
     });
 
   } catch (err: any) {
@@ -201,10 +229,10 @@ app.post('/api/swipe', checkAuth, async (req: any, res: Response) => {
     // 2. Enregistrer le swipe (on utilise upsert pour éviter les doublons sales)
     const { error: swipeError } = await supabase
       .from('swipes')
-      .upsert({ 
-        swiper_id: swiperId, 
-        swiped_id: swipedId, 
-        is_like: isLike 
+      .upsert({
+        swiper_id: swiperId,
+        swiped_id: swipedId,
+        is_like: isLike
       }, { onConflict: 'swiper_id,swiped_id' });
 
     if (swipeError) throw swipeError;
@@ -224,7 +252,7 @@ app.post('/api/swipe', checkAuth, async (req: any, res: Response) => {
     if (reciprocate) {
       // 5. Création de la conversation (Tri des IDs pour l'unicité du salon)
       const [u1, u2] = [swiperId, swipedId].sort();
-      
+
       const { data: conv, error: convError } = await supabase
         .from('conversations')
         .upsert({ user_1: u1, user_2: u2 }, { onConflict: 'user_1,user_2' })

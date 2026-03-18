@@ -1,6 +1,9 @@
 {
   "name": "express",
   "type": "module",
+  "scripts": {
+    "prod": "vercel --prod"
+  },
   "dependencies": {
     "@supabase/supabase-js": "^2.99.0",
     "cors": "^2.8.6",
