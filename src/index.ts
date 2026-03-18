@@ -65,6 +65,53 @@ app.get('/api/members/me', checkAuth, async (req: any, res: Response) => {
   }
 });
 
+// Créer le profil du membre après inscription (Création Supabase)
+app.post('/api/members', checkAuth, async (req: any, res: Response) => {
+  const { full_name, name, gender, major, graduation_year, year } = req.body;
+  const email = req.user.email; // Provenant du token vérifié
+
+  try {
+    // Vérifier si le membre existe déjà
+    const { data: existing } = await supabase
+      .from('members')
+      .select('id')
+      .eq('email', email)
+      .single();
+
+    if (existing) {
+      return res.status(400).json({ error: 'El miembro ya existe' });
+    }
+
+    const { data, error } = await supabase
+      .from('members')
+      .insert([
+        {
+          email,
+          full_name: full_name || name, // Fallback on name if full_name is empty
+          sex: gender, // DB column is 'sex'
+          major,
+          graduation_year: graduation_year ? parseInt(graduation_year, 10) : (year ? parseInt(year, 10) : null),
+          bio: '',
+          avatar_url: '',
+          is_verified: false,
+          university: 'The Vault'
+        }
+      ])
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Supabase Error:", error);
+      throw error;
+    }
+
+    res.status(201).json(data);
+  } catch (err: any) {
+    console.error("Erreur création membre:", err);
+    res.status(500).json({ error: 'Erreur lors de la création del miembro' });
+  }
+});
+
 // 2. Récupérer tous les membres (Public)
 // 2. Récupérer les membres non swipés (Filtrage Élite)
 app.get('/api/members', checkAuth, async (req: any, res: Response) => {
@@ -131,9 +178,9 @@ app.patch('/api/members/:id/avatar', checkAuth, upload.single('avatar'), async (
         // Signed URL looks like: .../storage/v1/object/sign/avatars/avatars/{id}-{timestamp}.{ext}
         const match = urlObj.pathname.match(/\/sign\/avatars\/(.+)/);
         if (match && match[1]) {
-           oldpath = match[1];
+          oldpath = match[1];
         }
-      } catch(e) { /* ignore parse error */ }
+      } catch (e) { /* ignore parse error */ }
     }
 
     if (oldpath) {
@@ -272,5 +319,129 @@ app.post('/api/swipe', checkAuth, async (req: any, res: Response) => {
   }
 });
 
+// 6. Récupérer les conversations du membre
+app.get('/api/conversations', checkAuth, async (req: any, res: Response) => {
+  try {
+    const { data: me } = await supabase.from('members').select('id').eq('email', req.user.email).single();
+    if (!me) return res.status(404).json({ error: 'Introuvable' });
+
+    const { data: convs, error } = await supabase
+      .from('conversations')
+      .select('id, user_1, user_2, user_1_data:members!user_1(id, full_name, avatar_url, major), user_2_data:members!user_2(id, full_name, avatar_url, major)')
+      .or(`user_1.eq.${me.id},user_2.eq.${me.id}`);
+
+    if (error) throw error;
+
+    const mapped = convs?.map((c: any) => {
+      const isUser1 = c.user_1 === me.id;
+      const peer = isUser1 ? c.user_2_data : c.user_1_data;
+      return {
+        id: c.id,
+        peer_id: peer.id,
+        peer_name: peer.full_name,
+        peer_avatar: peer.avatar_url,
+        peer_major: peer.major,
+      }
+    });
+
+    res.status(200).json(mapped || []);
+  } catch (err) {
+    res.status(500).json({ error: 'Impossible de charger les conversations' });
+  }
+});
+
+// 7. Messages (Fetch & Post)
+// 7. Messages (Fetch optimisé)
+app.get('/api/conversations/:id/messages', checkAuth, async (req: any, res: Response) => {
+  try {
+    const { lastTimestamp } = req.query; // On récupère la date du dernier message connu par le front
+    const { data: me } = await supabase.from('members').select('id').eq('email', req.user.email).single();
+
+    let query = supabase
+      .from('messages')
+      .select('*')
+      .eq('conversation_id', req.params.id);
+
+    // Si le front a déjà des messages, on ne demande que les plus récents
+    if (lastTimestamp) {
+      query = query.gt('created_at', lastTimestamp);
+    }
+
+    const { data: msgs, error } = await query.order('created_at', { ascending: true });
+
+    if (error) throw error;
+
+    const mapped = msgs?.map((m: any) => ({
+      ...m,
+      is_mine: m.sender_id === (me?.id)
+    }));
+
+    res.status(200).json(mapped || []);
+  } catch (err) {
+    res.status(500).json({ error: 'Erreur messages' });
+  }
+});
+
+app.post('/api/conversations/:id/messages', checkAuth, async (req: any, res: Response) => {
+  const { id: convId } = req.params;
+  const { content } = req.body;
+
+  try {
+    // 1. Choper ton ID interne via l'email du token
+    const { data: me } = await supabase.from('members').select('id').eq('email', req.user.email).single();
+    if (!me) return res.status(404).json({ error: 'Membre non trouvé' });
+
+    // 2. LA VÉRIF : Est-ce que cette conv t'appartient ?
+    const { data: isParticipant, error: authError } = await supabase
+      .from('conversations')
+      .select('id')
+      .eq('id', convId)
+      .or(`user_1.eq.${me.id},user_2.eq.${me.id}`)
+      .single();
+
+    if (authError || !isParticipant) {
+      console.warn(`Tentative d'intrusion : User ${me.id} sur Conv ${convId}`);
+      return res.status(403).json({ error: 'Accès au coffre refusé. Cette conversation ne vous appartient pas.' });
+    }
+
+    // 3. Insertion sécurisée
+    const { data, error } = await supabase
+      .from('messages')
+      .insert([{ conversation_id: convId, sender_id: me.id, content }])
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(201).json({ ...data, is_mine: true });
+
+  } catch (err) {
+    res.status(500).json({ error: 'Erreur système lors de l’envoi' });
+  }
+});
 
 export default app;
+
+// 8. Marquer les messages d'une conversation comme lus
+app.patch('/api/conversations/:id/read', checkAuth, async (req: any, res: Response) => {
+  const { id: convId } = req.params;
+
+  try {
+    // 1. Qui suis-je ?
+    const { data: me } = await supabase.from('members').select('id').eq('email', req.user.email).single();
+    if (!me) return res.status(404).json({ error: 'Membre non trouvé' });
+
+    // 2. On update tous les messages de cette conv où JE suis le destinataire (sender_id != me.id)
+    const { error } = await supabase
+      .from('messages')
+      .update({ is_read: true })
+      .eq('conversation_id', convId)
+      .neq('sender_id', me.id) // Important : on ne marque pas ses propres messages comme "lus par soi-même"
+      .eq('is_read', false);
+
+    if (error) throw error;
+
+    res.status(200).json({ message: 'Correspondencia marcada como leída' });
+  } catch (err) {
+    res.status(500).json({ error: 'Erreur lors de la mise à jour' });
+  }
+});
