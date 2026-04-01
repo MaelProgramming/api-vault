@@ -419,8 +419,6 @@ app.post('/api/conversations/:id/messages', checkAuth, async (req: any, res: Res
   }
 });
 
-export default app;
-
 // 8. Marquer les messages d'une conversation comme lus
 app.patch('/api/conversations/:id/read', checkAuth, async (req: any, res: Response) => {
   const { id: convId } = req.params;
@@ -445,3 +443,85 @@ app.patch('/api/conversations/:id/read', checkAuth, async (req: any, res: Respon
     res.status(500).json({ error: 'Erreur lors de la mise à jour' });
   }
 });
+
+// --- INVITATIONS SYSTEM ---
+
+// 9. Verificar Código (Public)
+app.post('/api/invitations/verify', async (req: Request, res: Response) => {
+  const { code } = req.body;
+  if (!code) return res.status(400).json({ error: 'Código no proporcionado' });
+
+  try {
+    const { data, error } = await supabase
+      .from('invitations')
+      .select('*')
+      .eq('code', code)
+      .eq('status', 'active')
+      .single();
+
+    if (error || !data) {
+      return res.status(404).json({ error: 'Llave inválida o ya utilizada' });
+    }
+
+    res.status(200).json({ valid: true, id: data.id });
+  } catch (err) {
+    console.error("Erreur vérification code:", err);
+    res.status(500).json({ error: 'Error del servidor' });
+  }
+});
+
+// 10. Forjar un Sello de Invitación (Protected)
+app.post('/api/invitations', checkAuth, async (req: any, res: Response) => {
+  try {
+    const { data: me } = await supabase.from('members').select('id').eq('email', req.user.email).single();
+    if (!me) return res.status(404).json({ error: 'Miembro no reconocido' });
+
+    // Limit to 3 active or total invitations per user? Let's check total for now.
+    const { count, error: countError } = await supabase
+      .from('invitations')
+      .select('id', { count: 'exact' })
+      .eq('created_by', me.id);
+
+    if (countError) throw countError;
+    if (count && count >= 3) {
+      return res.status(400).json({ error: 'Límite de sellos (3/3) alcanzado' });
+    }
+
+    const newCode = `VLT-${Math.random().toString(36).substring(2, 8).toUpperCase()}-${new Date().getFullYear()}`;
+
+    const { data, error } = await supabase
+      .from('invitations')
+      .insert([{ code: newCode, created_by: me.id, status: 'active' }])
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.status(201).json(data);
+  } catch (err) {
+    console.error("Erreur génération invitation:", err);
+    res.status(500).json({ error: 'Error al forjar la invitación' });
+  }
+});
+
+// 11. Cargar Sellos (Protected)
+app.get('/api/invitations', checkAuth, async (req: any, res: Response) => {
+  try {
+    const { data: me } = await supabase.from('members').select('id').eq('email', req.user.email).single();
+    if (!me) return res.status(404).json({ error: 'Miembro no reconocido' });
+
+    const { data, error } = await supabase
+      .from('invitations')
+      .select('*')
+      .eq('created_by', me.id)
+      .order('created_at', { ascending: false });
+
+    if (error) throw error;
+    res.status(200).json(data || []);
+  } catch (err) {
+    console.error("Erreur chargement invitations:", err);
+    res.status(500).json({ error: 'Error al consultar el cofre' });
+  }
+});
+
+// Export l'app (Doit être en dernier !!)
+export default app;
