@@ -94,7 +94,8 @@ app.post('/api/members', checkAuth, async (req: any, res: Response) => {
           bio: '',
           avatar_url: '',
           is_verified: false,
-          university: 'The Vault'
+          university: 'The Vault',
+          random_seed: Math.floor(Math.random() * 100) // Génération de la "graine d'alchimie" pour l'Afinidad Élite
         }
       ])
       .select()
@@ -116,10 +117,10 @@ app.post('/api/members', checkAuth, async (req: any, res: Response) => {
 // 2. Récupérer les membres non swipés (Filtrage Élite)
 app.get('/api/members', checkAuth, async (req: any, res: Response) => {
   try {
-    // 1. Choper mon ID via mon email (Firebase)
+    // 1. Choper mon profil via mon email (Firebase)
     const { data: me } = await supabase
       .from('members')
-      .select('id')
+      .select('id, major, graduation_year, random_seed')
       .eq('email', req.user.email)
       .single();
 
@@ -140,13 +141,46 @@ app.get('/api/members', checkAuth, async (req: any, res: Response) => {
     const { data, error } = await supabase
       .from('members')
       .select('*')
-      .not('id', 'in', `(${alreadySwipedIds.join(',')})`)
-      .order('created_at', { ascending: false })
-      .limit(20); // On envoie par packs de 20 pour la fluidité
+      .not('id', 'in', `(${alreadySwipedIds.join(',')})`);
 
     if (error) throw error;
 
-    res.status(200).json(data);
+    // --- ALGORITHME DE MATCHING ÉLITE ---
+    const usersWithScore = data?.map((candidate: any) => {
+      let score = 0;
+
+      // Affinité académique
+      if (candidate.major && me.major && candidate.major === me.major) {
+        score += 45;
+      }
+
+      // Affinité générationnelle
+      if (candidate.graduation_year && me.graduation_year) {
+        const diff = Math.abs(candidate.graduation_year - me.graduation_year);
+        if (diff === 0) score += 35;
+        else if (diff === 1) score += 15;
+        else if (diff <= 3) score += 5;
+      }
+      
+      // Facteur d'alchimie aléatoire stocké en BDD pour garantir la stabilité de l'Afinidad Élite
+      // Fallback sur le code ascii du début de l'ID si le membre a été créé avant cet update DB
+      const candidateSeed = candidate.random_seed || candidate.id?.charCodeAt(0) || 0;
+      const mySeed = me.random_seed || me.id?.charCodeAt(0) || 0;
+      
+      score += (candidateSeed + mySeed) % 20;
+      
+      return {
+        ...candidate,
+        elite_score: Math.min(score, 99) // Score plafonné à 99%
+      };
+    }) || [];
+
+    // Trier les membres pour envoyer la véritable "crème de la crème" (Top 20)
+    const eliteMatches = usersWithScore
+      .sort((a: any, b: any) => b.elite_score - a.elite_score)
+      .slice(0, 20);
+
+    res.status(200).json(eliteMatches);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Impossible de charger la pile' });
@@ -350,7 +384,6 @@ app.get('/api/conversations', checkAuth, async (req: any, res: Response) => {
   }
 });
 
-// 7. Messages (Fetch & Post)
 // 7. Messages (Fetch optimisé)
 app.get('/api/conversations/:id/messages', checkAuth, async (req: any, res: Response) => {
   try {
