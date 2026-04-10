@@ -347,7 +347,7 @@ app.post('/api/swipe', checkAuth, async (req: any, res: Response) => {
     if (reciprocate) {
       // 5. Création de la conversation (Tri des IDs pour l'unicité du salon)
       const [u1, u2] = [swiperId, swipedId].sort();
-
+      // test
       const { data: conv, error: convError } = await supabase
         .from('conversations')
         .upsert({ user_1: u1, user_2: u2 }, { onConflict: 'user_1,user_2' })
