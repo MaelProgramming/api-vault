@@ -19,7 +19,7 @@ if (!admin.apps.length) {
 }
 
 const app = express();
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 1024 * 1024 * 5 } });
 
 // --- MIDDLEWARE D'AUTHENTIFICATION FIREBASE ---
 const checkAuth = async (req: Request, res: Response, next: NextFunction) => {
@@ -161,14 +161,14 @@ app.get('/api/members', checkAuth, async (req: any, res: Response) => {
         else if (diff === 1) score += 15;
         else if (diff <= 3) score += 5;
       }
-      
+
       // Facteur d'alchimie aléatoire stocké en BDD pour garantir la stabilité de l'Afinidad Élite
       // Fallback sur le code ascii du début de l'ID si le membre a été créé avant cet update DB
       const candidateSeed = candidate.random_seed || candidate.id?.charCodeAt(0) || 0;
       const mySeed = me.random_seed || me.id?.charCodeAt(0) || 0;
-      
+
       score += (candidateSeed + mySeed) % 20;
-      
+
       return {
         ...candidate,
         elite_score: Math.min(score, 99) // Score plafonné à 99%
@@ -196,7 +196,21 @@ app.patch('/api/members/:id/avatar', checkAuth, upload.single('avatar'), async (
     return res.status(400).json({ error: 'Aucun fichier envoyé' });
   }
 
+  // Vérification de sécurité : format du fichier
+  const allowedMimeTypes = ['image/jpeg', 'image/png', 'image/webp'];
+  if (!allowedMimeTypes.includes(file.mimetype)) {
+    return res.status(400).json({ error: 'Type de fichier non autorisé. Uniquement JPG, PNG, WEBP.' });
+  }
+
   try {
+    // Vérification de sécurité : l'utilisateur modifie-t-il bien son propre profil ?
+    const { data: me } = await supabase.from('members').select('id').eq('email', req.user.email).single();
+
+    if (!me || me.id !== id) {
+      console.warn(`[SECURITY WARNING] User ${me?.id || req.user.email} tried to update avatar of user ${id}`);
+      return res.status(403).json({ error: 'Accès refusé. Vous ne pouvez modifier que votre propre avatar.' });
+    }
+
     // 0. Fetch the old avatar to get 'oldpath' and delete it so we don't accumulate images
     const { data: memberData } = await supabase
       .from('members')
